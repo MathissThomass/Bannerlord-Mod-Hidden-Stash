@@ -1,15 +1,16 @@
-﻿using System.Collections.Generic;
-using HiddenStash.Utils;
+﻿using Newtonsoft.Json;
+using System.Collections.Generic;
 using TaleWorlds.CampaignSystem;
 using TaleWorlds.CampaignSystem.Actions;
-using TaleWorlds.CampaignSystem.Roster;
+using TaleWorlds.CampaignSystem.Extensions;
 using TaleWorlds.CampaignSystem.Settlements;
 
 namespace HiddenStash.Behaviors;
 
 public class HiddenStashBehaviors : CampaignBehaviorBase
 {
-    private Dictionary<string, ItemRoster>? StashInventoryBeforeLost { get; set; }
+    private Dictionary<string, Dictionary<string, int>> _stashSnapshots = new();
+    private string _stashSnapshotsJson = "{}";
 
     public override void RegisterEvents()
     {
@@ -18,31 +19,63 @@ public class HiddenStashBehaviors : CampaignBehaviorBase
 
     public override void SyncData(IDataStore dataStore)
     {
-        var stashInventoryBeforeLost = StashInventoryBeforeLost;
-        dataStore.SyncData("HiddenStash_StashInventoryBeforeLost", ref stashInventoryBeforeLost);
-        StashInventoryBeforeLost = stashInventoryBeforeLost;
+        dataStore.SyncData("HiddenStash_StashSnapshotsJson", ref _stashSnapshotsJson);
+        
+        if (dataStore.IsLoading)
+        {
+            try
+            {
+                _stashSnapshots = JsonConvert.DeserializeObject<Dictionary<string, Dictionary<string, int>>>(_stashSnapshotsJson)
+                                 ?? new Dictionary<string, Dictionary<string, int>>();
+            }
+            catch
+            {
+                _stashSnapshots = new Dictionary<string, Dictionary<string, int>>();
+                _stashSnapshotsJson = "{}";
+            }
+        }
+
+        if (dataStore.IsSaving)
+        {
+            _stashSnapshotsJson = JsonConvert.SerializeObject(_stashSnapshots);
+        }
     }
 
     private void OnSettlementOwnerChangedEvent(Settlement settlement, bool openToClaim, Hero newOwner, Hero oldOwner,
         Hero capturerHero, ChangeOwnerOfSettlementAction.ChangeOwnerOfSettlementDetail detail)
     {
-        if (oldOwner == Hero.MainHero && settlement.Stash.Count != 0)
+        if (oldOwner == Hero.MainHero && settlement.Stash != null && settlement.Stash.Count > 0)
         {
-            if (StashInventoryBeforeLost == null)
+            var snapshot = new Dictionary<string, int>();
+
+            foreach (var element in settlement.Stash)
             {
-                StashInventoryBeforeLost = new Dictionary<string, ItemRoster>();
+                if (element.IsEmpty) continue;
+                var item = element.EquipmentElement.Item;
+                if (item == null) continue;
+
+                snapshot.TryGetValue(item.StringId, out var current);
+                snapshot[item.StringId] = current + element.Amount;
             }
 
-            StashInventoryBeforeLost[settlement.StringId] = InventoryUtils.CloneRoster(settlement.Stash);
+            _stashSnapshots[settlement.StringId] = snapshot;
         }
-
-        else if (newOwner == Hero.MainHero)
+        else if (newOwner == Hero.MainHero && settlement.Stash != null)
         {
-            if (StashInventoryBeforeLost == null || !StashInventoryBeforeLost.TryGetValue(settlement.StringId, out var stash)) return;
-            foreach (var item in stash)
+            if (!_stashSnapshots.TryGetValue(settlement.StringId, out var snapshot))
+                return;
+
+            foreach (var kvp in snapshot)
             {
-                settlement.Stash.Add(item);
+                var itemId = kvp.Key;
+                var count = kvp.Value;
+
+                var item = Items.All.Find(i => i.StringId == itemId);
+                if (item == null) continue;
+
+                settlement.Stash.AddToCounts(item, count);
             }
+            _stashSnapshots.Remove(settlement.StringId);
         }
     }
 }
